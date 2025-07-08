@@ -20,7 +20,7 @@ clear_state = state_mgr.clear_state
 router = Router()
 
 
-@router.message(F.text == "🔍 Найти конспект")
+@router.message(F.text == "📝  Найти конспект")
 async def find_flow(msg: types.Message) -> None:
     # Сбрасываем состояние перед началом поиска
     set_state(msg.from_user.id, {})
