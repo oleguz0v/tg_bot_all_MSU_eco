@@ -1,9 +1,11 @@
 from aiogram import Router, types, F
-from config import CHANNEL_ID
+from config import CHANNEL_ID, USER_DATA_FILE
 from database.db import AsyncSessionLocal
 from database.models import Lecture
 from datetime import datetime
 import os  # Импорт модуля для работы с файловой системой
+import asyncio
+from utils.storage import load_json
 
 router = Router()
 
@@ -62,3 +64,32 @@ async def on_channel_pdf(post: types.Message) -> None:
         session.add(lec)
         await session.commit()
     print("Saved lecture:", direction, course, subject, material_type, date)
+
+
+@router.channel_post(F.text.startswith("/message_for_everybody"))
+async def broadcast_message(post: types.Message) -> None:
+    if post.chat.id != CHANNEL_ID:
+        return
+
+    full_text = (post.text or "").strip()
+    parts = full_text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await post.answer("⚠️ Укажите текст после команды: /message_for_everybody <текст>")
+        return
+
+    message_text = parts[1].strip()
+
+    users = load_json(USER_DATA_FILE, {})
+    chat_ids = list(users.keys())
+
+    sent = 0
+    for uid in chat_ids:
+        try:
+            await post.bot.send_message(int(uid), message_text)
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            # Пропускаем неудачные отправки, не прерывая рассылку
+            pass
+
+    await post.answer(f"✅ Сообщение отправлено {sent} пользователям")
