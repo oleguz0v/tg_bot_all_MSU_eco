@@ -8,7 +8,8 @@ from database.db import init_db
 from utils.storage import load_json, save_json
 from utils.auth import login
 from utils.parser import get_announcements
-from utils.hashing import get_course_hash
+from utils.hashing import get_course_hash, get_course_hash_v1, matches_existing_hash
+from utils.locks import get_lock
 
 # Импортируем все роутеры
 from handlers import (
@@ -21,7 +22,6 @@ from handlers import (
 async def periodic_check(bot: Bot):
     """Фоновая проверка всех курсов каждые 10 минут."""
     while True:
-        await asyncio.sleep(600)
         logging.info("Starting periodic check of announcements...")
 
         users = load_json(USER_DATA_FILE, {})
@@ -52,6 +52,8 @@ async def periodic_check(bot: Bot):
 
             try:
                 anns = await get_announcements(session, url)
+                if not anns:
+                    continue
                 new_hash = get_course_hash(anns)
             except Exception as e:
                 logging.error(f"Error getting announcements for {url}: {e}")
@@ -59,29 +61,49 @@ async def periodic_check(bot: Bot):
             finally:
                 await session.close()
 
-            record = ann.get(url, {})
             now_ts = int(time.time())
 
-            # Если хеш изменился - отправляем уведомления
-            if new_hash != record.get("page_hash"):
-                ann[url] = {"page_hash": new_hash, "last_found": now_ts}
-                save_json(ANNOUNCEMENTS_FILE, ann)
+            # Вся логика проверки и обновления под одним URL-локом
+            url_lock = get_lock(f"url:{url}")
+            async with url_lock:
+                fresh_ann = load_json(ANNOUNCEMENTS_FILE, {})
+                fresh_record = fresh_ann.get(url)
+                
+                # Первая инициализация без уведомлений
+                if fresh_record is None:
+                    fresh_ann[url] = {"page_hash": new_hash, "last_found": now_ts}
+                    save_json(ANNOUNCEMENTS_FILE, fresh_ann)
+                    # НЕ continue — просто пропускаем уведомления для этого курса
+                else:
+                    stored_hash = fresh_record.get("page_hash")
 
-                for chat_id, course_name in subs:
-                    try:
-                        await bot.send_message(
-                            int(chat_id),
-                            f"🔔 Новое объявление в «{course_name}»!"
-                        )
-                        # Обновляем время последнего обновления
-                        if chat_id in users:
-                            users[chat_id]["last_update"] = now_ts
-                    except Exception as e:
-                        logging.error(f"Error sending to {chat_id}: {e}")
+                    # Миграция старого хеша на новую схему — без уведомлений
+                    if stored_hash and stored_hash == get_course_hash_v1(anns) and stored_hash != new_hash:
+                        fresh_ann[url] = {"page_hash": new_hash, "last_found": now_ts}
+                        save_json(ANNOUNCEMENTS_FILE, fresh_ann)
+                        # НЕ continue — просто пропускаем уведомления
+                    # Реальное изменение — обновляем и уведомляем
+                    elif not matches_existing_hash(anns, stored_hash):
+                        fresh_ann[url] = {"page_hash": new_hash, "last_found": now_ts}
+                        save_json(ANNOUNCEMENTS_FILE, fresh_ann)
+
+                        for chat_id, course_name in subs:
+                            try:
+                                await bot.send_message(
+                                    int(chat_id),
+                                    f"🔔 Новое объявление в «{course_name}»!"
+                                )
+                                if chat_id in users:
+                                    users[chat_id]["last_update"] = now_ts
+                            except Exception as e:
+                                logging.error(f"Error sending to {chat_id}: {e}")
 
         # Сохраняем обновлённые данные
         save_json(USER_DATA_FILE, users)
         logging.info("Periodic check completed")
+
+        # Ждём до следующего цикла
+        await asyncio.sleep(600)
 
 
 async def on_startup():

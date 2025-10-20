@@ -86,14 +86,19 @@ async def toggle_course_subscription(message: Message):
     else:
         user.setdefault("subscriptions", []).append(course_name)
         text = f"✅ Подписались на «{course_name}»"
-        ann = load_json(ANNOUNCEMENTS_FILE, {})
-        if course_url not in ann:
-            session = await login(user["username"], user["password"])
-            anns = await get_announcements(session, course_url)
-            await session.close()
-            h = get_course_hash(anns)
-            ann[course_url] = {"page_hash": h, "last_found": int(time.time())}
-            save_json(ANNOUNCEMENTS_FILE, ann)
+        
+        # Инициализация хеша курса под локом, чтобы избежать гонок
+        from utils.locks import get_lock
+        url_lock = get_lock(f"url:{course_url}")
+        async with url_lock:
+            ann = load_json(ANNOUNCEMENTS_FILE, {})
+            if course_url not in ann:
+                session = await login(user["username"], user["password"])
+                anns = await get_announcements(session, course_url)
+                await session.close()
+                h = get_course_hash(anns)
+                ann[course_url] = {"page_hash": h, "last_found": int(time.time())}
+                save_json(ANNOUNCEMENTS_FILE, ann)
 
     save_json(USER_DATA_FILE, users)
     await message.answer(text)
@@ -206,15 +211,18 @@ async def process_manual_name(message: Message):
     if name not in user.setdefault("subscriptions", []):
         user["subscriptions"].append(name)
 
-    # инициализируем announcements.json
-    ann = load_json(ANNOUNCEMENTS_FILE, {})
-    if url not in ann:
-        session = await login(user["username"], user["password"])
-        anns = await get_announcements(session, url)
-        await session.close()
-        h = get_course_hash(anns)
-        ann[url] = {"page_hash": h, "last_found": int(time.time())}
-        save_json(ANNOUNCEMENTS_FILE, ann)
+    # инициализируем announcements.json под локом
+    from utils.locks import get_lock
+    url_lock = get_lock(f"url:{url}")
+    async with url_lock:
+        ann = load_json(ANNOUNCEMENTS_FILE, {})
+        if url not in ann:
+            session = await login(user["username"], user["password"])
+            anns = await get_announcements(session, url)
+            await session.close()
+            h = get_course_hash(anns)
+            ann[url] = {"page_hash": h, "last_found": int(time.time())}
+            save_json(ANNOUNCEMENTS_FILE, ann)
 
     # сбрасываем временный state и url
     user["manual_state"] = None
